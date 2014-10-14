@@ -51,6 +51,7 @@
 #include "exec/address-spaces.h"
 #include "sysemu/arch_init.h"
 #include "qemu/bitmap.h"
+#include "sysemu/device_tree.h"
 #include "qemu/config-file.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/cpu_hotplug.h"
@@ -75,7 +76,7 @@
 /* Leave a chunk of memory at the top of RAM for the BIOS ACPI tables
  * (128K) and other BIOS datastructures (less than 4K reported to be used at
  * the moment, 32K should be enough for a while).  */
-unsigned acpi_data_size = 0x20000 + 0x8000;
+unsigned acpi_data_size = 0x20000 + 0x80000;
 void pc_set_legacy_acpi_data_size(void)
 {
     acpi_data_size = 0x10000;
@@ -741,17 +742,77 @@ static long get_file_size(FILE *f)
     return size;
 }
 
+static int load_dtb(FWCfgState *fw_cfg,
+                    const char *dtb_filename,
+                    void **dtb_addr,
+                    int *dtb_size)
+{
+    void *fdt = NULL;
+
+    fdt = load_device_tree(dtb_filename, dtb_size);
+    if (!fdt) {
+        fprintf(stderr, "Couldn't open dtb file %s\n", dtb_filename);
+        return -1;
+    }
+
+    qemu_fdt_dumpdtb(fdt, *dtb_size);
+
+    *dtb_addr = fdt;
+
+    return 0;
+}
+
+struct setup_data {
+        uint64_t next;
+        uint32_t type;
+#define SETUP_NONE      0
+#define SETUP_E820_EXT  1
+#define SETUP_DTB       2
+#define SETUP_PCI       3
+#define SETUP_EFI       4
+        uint32_t len;
+        uint8_t data[0];
+} __attribute__((packed));
+
+static int setup_dtb_data(FWCfgState *fw_cfg,
+                          void **setup_data_addr, int *setup_data_size,
+                          void *dtb_addr, off_t dtb_size)
+{
+    struct setup_data *sd;
+    int sdsize;
+
+    sd = g_malloc(sizeof(struct setup_data) + dtb_size);
+    if (!sd) {
+        return -1;
+    }
+
+    memset(sd, 0, sizeof(struct setup_data) + dtb_size);
+    sd->next = 0;
+    sd->type = SETUP_DTB;
+    sd->len = dtb_size;
+    memcpy(sd->data, dtb_addr, dtb_size);
+
+    sdsize = sd->len + sizeof(struct setup_data);
+
+    *setup_data_addr = (void *) sd;
+    *setup_data_size = sdsize;
+
+    return 0;
+}
+
 static void load_linux(FWCfgState *fw_cfg,
                        const char *kernel_filename,
                        const char *initrd_filename,
+                       const char *dtb_filename,
                        const char *kernel_cmdline,
                        hwaddr max_ram_size)
 {
     uint16_t protocol;
-    int setup_size, kernel_size, initrd_size = 0, cmdline_size;
+    int setup_size, kernel_size, initrd_size = 0, cmdline_size, dtb_size = 0, setup_data_size = 0;;
     uint32_t initrd_max;
     uint8_t header[8192], *setup, *kernel, *initrd_data;
-    hwaddr real_addr, prot_addr, cmdline_addr, initrd_addr = 0;
+    hwaddr real_addr, prot_addr, cmdline_addr, initrd_addr = 0, setup_data_addr = 0;
+    void *dtb_addr, *setup_data;
     FILE *f;
     char *vmode;
 
@@ -891,6 +952,53 @@ static void load_linux(FWCfgState *fw_cfg,
         stl_p(header+0x21c, initrd_size);
     }
 
+    /* load dtb */
+    if (dtb_filename) {
+        int retval;
+        retval = load_dtb(fw_cfg, dtb_filename, &dtb_addr, &dtb_size);
+        if (retval < 0) {
+            fprintf(stderr, "qemu: error loading dtb %s: %s\n",
+                    dtb_filename, strerror(errno));
+            exit(1);
+        }
+
+        retval = setup_dtb_data(fw_cfg, &setup_data, &setup_data_size,
+                dtb_addr, dtb_size);
+        if (retval < 0) {
+            fprintf(stderr, "qemu: error no memory to setup_data\n");
+            exit(1);
+        }
+
+//        if (!initrd_addr) {
+//            setup_data_addr = (initrd_max-initrd_size-setup_data_size) & ~4095;
+//        } else {
+            setup_data_addr = QEMU_ALIGN_UP(initrd_max-initrd_size-setup_data_size, 4096);
+//        }
+
+        stq_p(header+0x250, setup_data_addr);
+
+        cpu_physical_memory_write(setup_data_addr, setup_data, setup_data_size);
+
+#if 1
+        fprintf(stderr,
+                "qemu: initrd_max      = %d\n"
+                "qemu: dtb addr        = 0x%p\n"
+                "qemu: dtb size        = %d\n"
+                "qemu: setup_data size = %d\n"
+                "qemu: setup_data addr = 0x%p\n"
+                "qemu: setup_data_addr = 0x" TARGET_FMT_plx "\n"
+                "qemu: header[0x250]   = " TARGET_FMT_plx "\n",
+                initrd_max,
+                dtb_addr,
+                dtb_size,
+                setup_data_size,
+                setup_data,
+                setup_data_addr,
+                ldq_p(header+0x250));
+#endif
+
+    }
+
     /* load kernel and setup */
     setup_size = header[0x1f1];
     if (setup_size == 0) {
@@ -911,6 +1019,11 @@ static void load_linux(FWCfgState *fw_cfg,
         exit(1);
     }
     fclose(f);
+
+    fprintf(stderr,
+            "qemu: setup_size   = %d\n",
+            setup_size);
+
     memcpy(setup, header, MIN(sizeof(header), setup_size));
 
     fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_ADDR, prot_addr);
@@ -1298,7 +1411,7 @@ FWCfgState *pc_memory_init(MachineState *machine,
 
     if (linux_boot) {
         load_linux(fw_cfg, machine->kernel_filename, machine->initrd_filename,
-                   machine->kernel_cmdline, below_4g_mem_size);
+                   machine->dtb_filename, machine->kernel_cmdline, below_4g_mem_size);
     }
 
     for (i = 0; i < nb_option_roms; i++) {

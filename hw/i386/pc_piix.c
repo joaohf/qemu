@@ -177,6 +177,8 @@ static void pc_init1(MachineState *machine,
                             mc->name, smbios_legacy_mode);
     }
 
+    machine->dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
+
     /* allocate ram and load rom/bios */
     if (!xen_enabled()) {
         fw_cfg = pc_memory_init(machine, system_memory,

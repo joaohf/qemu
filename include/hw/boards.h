@@ -131,6 +131,7 @@ struct MachineState {
     char *kernel_filename;
     char *kernel_cmdline;
     char *initrd_filename;
+    char *dtb_filename;
     const char *cpu_model;
 };
 
