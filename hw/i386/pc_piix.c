@@ -88,6 +88,7 @@ static void pc_init1(QEMUMachineInitArgs *args,
     DeviceState *icc_bridge;
     FWCfgState *fw_cfg = NULL;
     PcGuestInfo *guest_info;
+    const char *dtb_filename = NULL;
 
     if (xen_enabled() && xen_hvm_init(&ram_memory) != 0) {
         fprintf(stderr, "xen hardware virtual machine initialisation failed\n");
@@ -128,11 +129,13 @@ static void pc_init1(QEMUMachineInitArgs *args,
     guest_info->has_pci_info = has_pci_info;
     guest_info->isapc_ram_fw = !pci_enabled;
 
+    dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
+
     /* allocate ram and load rom/bios */
     if (!xen_enabled()) {
         fw_cfg = pc_memory_init(system_memory,
                        args->kernel_filename, args->kernel_cmdline,
-                       args->initrd_filename,
+                       args->initrd_filename, dtb_filename,
                        below_4g_mem_size, above_4g_mem_size,
                        rom_memory, &ram_memory, guest_info);
     }

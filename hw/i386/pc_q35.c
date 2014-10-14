@@ -75,6 +75,7 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     PCIDevice *ahci;
     DeviceState *icc_bridge;
     PcGuestInfo *guest_info;
+    const char *dtb_filename = NULL;
 
     if (xen_enabled() && xen_hvm_init(&ram_memory) != 0) {
         fprintf(stderr, "xen hardware virtual machine initialisation failed\n");
@@ -113,11 +114,13 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     guest_info->isapc_ram_fw = false;
     guest_info->has_acpi_build = has_acpi_build;
 
+    dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
+
     /* allocate ram and load rom/bios */
     if (!xen_enabled()) {
         pc_memory_init(get_system_memory(),
                        args->kernel_filename, args->kernel_cmdline,
-                       args->initrd_filename,
+                       args->initrd_filename, dtb_filename,
                        below_4g_mem_size, above_4g_mem_size,
                        rom_memory, &ram_memory, guest_info);
     }
